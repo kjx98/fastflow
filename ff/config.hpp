@@ -19,6 +19,15 @@
  ****************************************************************************
  */
 
+/* Author: Massimo Torquati
+ *
+ */
+
+// This file contains some configuration variables. Some of them are
+// particularly critical for performance matters, for example:
+// FF_MAPPING_STRING, BLOCKING_MODE, TRACE_FASTFLOW, etc. 
+//
+
 #ifndef FF_CONFIG_HPP
 #define FF_CONFIG_HPP
 
@@ -29,20 +38,95 @@
 #endif
 
 
-#if !defined(CACHE_LINE_SIZE)
-#define CACHE_LINE_SIZE 64
+/*
+ * If NO_DEFAULT_MAPPING is not defined (and if FF_MAPPING_STRING is equal 
+ * to ""), the FastFlow library pins each spawned thread to a core context 
+ * according to a simple policy: thread 0 to core 0, thread 1
+ * to core 1, and so on restarting from the beginning if there are more 
+ * threads than core contexts (which is usually not a good idea if 
+ * performance matters). 
+ * Depending on the OS numbering of core contexts, core 0 and core 1 may be
+ * "far away" one each other, e.g., they could be on two distinct CPUs,
+ * thus not sharing any level of cache.
+ * Therefore, to control the mapping of the thread when the OS numbering
+ * is a bit mess (e.g. Power8, AMD machines, some Intel Xeon), you have
+ * two options: 
+ *  1. to use the Mammut library, which provides a layer for discovering 
+ *     core contexts
+ *  2. to set the FF_MAPPING_STRING in this file. 
+ *
+ * For case 2, the simplest option is to run the Bash script 
+ * 'mapping_string.sh', which returns a suitable string that can be 
+ * copy-paste in the FF_MAPPING_STRING preprocessor variable. 
+ * Note that, if you wish (and trust it) the script can modify the 
+ * config.hpp file for you.  The script also sets the FF_NUM_CORES and 
+ * FF_NUM_REAL_CORES variables. 
+ * Example: 
+ *  > ./mapping_string.sh
+ *  > FF_MAPPING_STRING="0,2,1,3"
+ *  > FF_NUM_CORES=4
+ *  > FF_NUM_REAL_CORES=2
+ *  > Do you want that I change the ./config.hpp file for you? (y/N) y
+ *  > This is the new FF_MAPPING_STRING variable in the ./config.hpp file:
+ *  > #if !defined MAPPING_STRING
+ *  > #define FF_MAPPING_STRING "0,2,1,3"
+ *  > #else
+ *  > ...
+ *
+ */
+/*
+ * NOTE: if FF_MAPPING_STRING is "" (default), FastFlow executes a linear
+ *       mapping of threads. 
+ */
+#if !defined MAPPING_STRING
+#define FF_MAPPING_STRING ""
+#else
+#define FF_MAPPING_STRING MAPPING_STRING
+#endif
+/* 
+ * It is the number of the logical cores of the machine.
+ * NOTE: if FF_NUM_CORES is -1 (default), FastFlow will use ff_numCores()
+ *       (which is a costly function).
+ */
+#if !defined NUM_CORES
+#define FF_NUM_CORES -1
+#else
+#define FF_NUM_CORES NUM_CORES
+#endif
+/* 
+ * It is the number of the physical cores of the machine.
+ * NOTE: if FF_NUM_REAL_CORES is -1 (default), FastFlow will use 
+ *       ff_realNumCores() (which is a costly function)
+ */
+#if !defined NUM_REAL_CORES
+#define FF_NUM_REAL_CORES -1
+#else
+#define FF_NUM_REAL_CORES NUM_REAL_CORES
 #endif
 
+
+#if defined(FF_BOUNDED_BUFFER)
+#define FF_FIXED_SIZE true
+#else  // NOTE: by default the queues are unbounded!!!!
+#define FF_FIXED_SIZE false
+#endif
+
+// WARNING: Do not change the following with SWSR_Ptr_Buffer unless
+// you know what your are doing....
+#define FFBUFFER uSWSR_Ptr_Buffer
 
 /*
- * NOTE: by default FF_BOUNDED_BUFFER is not defined
- * because the uSWSR_Ptr_Buffer may act as a bounded queue.
+ * This is the default buffer capacity and the default difference between the input
+ * and output channels capacity.
+ * 
  */
-#if defined(FF_BOUNDED_BUFFER)
-#define FFBUFFER SWSR_Ptr_Buffer
-#else  // unbounded buffer
-#define FFBUFFER uSWSR_Ptr_Buffer
+#if !defined(DEFAULT_BUFFER_CAPACITY)
+#define DEFAULT_BUFFER_CAPACITY              2048
 #endif
+#if !defined(DEFAULT_IN_OUT_CAPACITY_DIFFERENCE)
+#define DEFAULT_IN_OUT_CAPACITY_DIFFERENCE    128
+#endif
+
 
 /* To save energy and improve hyperthreading performance
  * define the following macro
@@ -77,7 +161,7 @@
 
 /* Used in blocking mode to limit the amount of time 
  * before checking again the input/output queue.
- * NOTE: cannot be greater than 1e+9 (i.e. 1sec)
+ * NOTE: it cannot be greater than 1e+9 (i.e. 1sec)
  */
 #define FF_TIMEDWAIT_NS   200000
 
@@ -90,12 +174,12 @@
 #define DEF_OFARM_ONDEMAND_MEMORY 10000
 
 
-// if the following is defined, then an initial barrier is executed among all threads
+// If the following is defined, then an initial barrier is executed among all threads
 // to ensure that all threads are started. It can be commented out if that condition 
-// is not needed.
-#define FF_INITIAL_BARRIER
+// is not needed. Usually it is useful for debugging purposes.
+// #define FF_INITIAL_BARRIER
 
-// the barrier implementation to use
+// Which barrier implementation to use
 #if !defined(BARRIER_T)
 #define BARRIER_T             spinBarrier
 #endif
@@ -112,13 +196,17 @@
 // Notice that backoff bounds are highly dependent on the system and 
 // from the concurrency levels. This values should be carefully tuned
 // in order to achieve the maximum performance.
-
 #if !defined(BACKOFF_MIN)
 #define BACKOFF_MIN 128
 #endif
 #if !defined(BACKOFF_MAX)
 #define BACKOFF_MAX 1024
 #endif
+
+#if !defined(CACHE_LINE_SIZE)
+#define CACHE_LINE_SIZE 64
+#endif
+
 
 // TODO:
 //#if defined(NO_CMAKE_CONFIG)
@@ -151,5 +239,8 @@
 
 // OpenCL additional code needed to compile kernels
 #define FF_OPENCL_DATATYPES_FILE "ff_opencl_datatypes.cl"
+
+// Convenience macros.
+#define FF_IGNORE_UNUSED(x) static_cast<void>(x)
 
 #endif /* FF_CONFIG_HPP */

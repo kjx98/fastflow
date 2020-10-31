@@ -69,13 +69,13 @@ int main(int argc, char * argv[]) {
         ParallelForPipeReduce<std::vector<long>* > pfr(nworkers,true); // spinwait is set to true
         pfr.disableScheduler();
         
-        auto Map = [&](const long start, const long stop, const int thid, ff_buffernode &node) {
+        auto Map = [&](const long start, const long stop, const int /*thid*/, ff_buffernode &node) {
             if (start == stop) return;
             std::vector<long>*  C = new std::vector<long>;
             C->reserve(stop-start);
             for(long i=start;i<stop;++i)  {
                 // waste some time to simulate a more complex computation
-                for(volatile long m=0;m<50;++m); 
+                ticks_wait(1000); //for(volatile long m=0;m<50;++m); 
                 C->push_back(A[i]*B[i]);
             }
             node.ff_send_out(C);

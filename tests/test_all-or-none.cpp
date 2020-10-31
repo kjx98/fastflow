@@ -14,7 +14,7 @@
  *                        |             |
  *                        |      |--> Worker -->|
  *                        v      |              |
- *     Generator --> Scheduler-->|              |--> Collector --> Gatherer
+ *     Generator --> Scheduler-->|              |--> Gatherer
  *                        ^      |              |
  *                        |      |--> Worker -->|
  *                        |             |
@@ -45,7 +45,7 @@ struct Task_t {
 // generator of the stream
 struct Generator: ff_node_t<Task_t> {
     Generator(long niter):niter(niter) {}
-    Task_t* svc(Task_t* item) {
+    Task_t* svc(Task_t*) {
 	// NOTE: if you change the number of writes please remember to
 	// update NUM_WRITES_PER_ITARATION 
 	for(int i=0;i<niter;++i) {  
@@ -72,7 +72,7 @@ struct Generator: ff_node_t<Task_t> {
 
 // last stage of the pipeline
 struct Gatherer: ff_minode_t<Task_t> {
-    Task_t* svc(Task_t* item) {	return GO_ON;   }
+    Task_t* svc(Task_t*) {	return GO_ON;   }
     void svc_end() {
 	printf("number of writes %ld\n", some_global_state);
     }
@@ -181,7 +181,7 @@ int main(int argc, char* argv[]) {
     Generator Gen(niter);
     Gatherer  Gat;
 
-    const size_t nworkers = 3;
+    const size_t nworkers = 1; // 3
 
     ff_farm farm;
     std::vector<ff_node*> W;    

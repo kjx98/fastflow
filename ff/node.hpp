@@ -50,10 +50,10 @@
 namespace ff {
 
 static void* FF_EOS           = (void*)(ULLONG_MAX);     /// automatically propagated
-static void* FF_EOS_NOFREEZE  = (void*)(ULLONG_MAX-1);   /// non automatically propagated
+static void* FF_EOS_NOFREEZE  = (void*)(ULLONG_MAX-1);   /// not automatically propagated
 static void* FF_EOSW          = (void*)(ULLONG_MAX-2);   /// propagated only by farm's stages
-static void* FF_GO_ON         = (void*)(ULLONG_MAX-3);   /// non automatically propagated
-static void* FF_GO_OUT        = (void*)(ULLONG_MAX-4);   /// non automatically propagated
+static void* FF_GO_ON         = (void*)(ULLONG_MAX-3);   /// not automatically propagated
+static void* FF_GO_OUT        = (void*)(ULLONG_MAX-4);   /// not automatically propagated
 static void* FF_TAG_MIN       = (void*)(ULLONG_MAX-10);  /// just a lower bound mark
 // The FF_GO_OUT is quite similar to the FF_EOS_NOFREEZE. Both of them are not propagated automatically to
 // the next stage, but while the first one is used to exit the main computation loop and, if this is the case, to be frozen,
@@ -78,7 +78,7 @@ struct OptLevel {
 };
 struct OptLevel1: OptLevel {
     OptLevel1() {
-        max_nb_threads=ff_numCores();
+        max_nb_threads=ff_numCores();   // TODO: use the mapper
         blocking_mode=true;
         no_initial_barrier=true;
         remove_collector=true;
@@ -86,7 +86,7 @@ struct OptLevel1: OptLevel {
 };
 struct OptLevel2: OptLevel {
     OptLevel2() {
-        max_nb_threads=ff_numCores();
+        max_nb_threads=ff_numCores();   // TODO: use the mapper
         blocking_mode=true;
         no_initial_barrier=true;
         merge_with_emitter=true;
@@ -297,8 +297,8 @@ protected:
 
 
 #if defined(FF_TASK_CALLBACK)
-    virtual void callbackIn(void  *t=NULL) {  }
-    virtual void callbackOut(void *t=NULL) {  }
+    virtual void callbackIn(void  * =NULL) { }
+    virtual void callbackOut(void * =NULL) { }
 #endif
     
 public:
@@ -443,7 +443,6 @@ static void * proxy_thread_routine(void * arg) {
 // forward declaration    
 class ff_loadbalancer;
 class ff_gatherer;
-    
 
 /*!
  *  \class ff_node
@@ -494,8 +493,8 @@ private:
     friend class ff_monode;
     friend class ff_a2a;
     friend class ff_comb;
-    friend struct mo_transformer;
-    friend struct mi_transformer;
+    friend struct internal_mo_transformer;
+    friend struct internal_mi_transformer;
     
 private:
     FFBUFFER        * in;           ///< Input buffer, built upon SWSR lock-free (wait-free) 
@@ -538,18 +537,15 @@ protected:
     virtual inline bool Push(void *ptr, unsigned long retry=((unsigned long)-1), unsigned long ticks=(TICKS2WAIT)) {
         if (blocking_out) {
         retry:
+            bool empty=out->empty();
             bool r = push(ptr);
             if (r) { // OK
-                ++(*p_cons_counter);
-                ++prod_counter;
-                pthread_cond_signal(p_cons_c);
+                if (empty) pthread_cond_signal(p_cons_c);
             } else { // FULL
+                struct timespec tv;
+                timedwait_timeout(tv);
                 pthread_mutex_lock(prod_m);
-                if (prod_counter.load() >= out->buffersize()) {
-                    struct timespec tv;
-                    timedwait_timeout(tv);
-                    pthread_cond_timedwait(prod_c,prod_m,&tv);
-                }
+                pthread_cond_timedwait(prod_c,prod_m,&tv);
                 pthread_mutex_unlock(prod_m);
                 goto retry;
             }
@@ -567,17 +563,11 @@ protected:
             if (!in_active) { *ptr=NULL; return false; }
         retry:
             bool r = in->pop(ptr);
-            if (r) { // OK
-                --(*p_prod_counter);
-                --cons_counter;
-                pthread_cond_signal(p_prod_c);
-            } else { // EMPTY
+            if (!r) { // EMPTY                
+                struct timespec tv;
+                timedwait_timeout(tv);
                 pthread_mutex_lock(cons_m);
-                if (cons_counter.load() == 0) {
-                    struct timespec tv;
-                    timedwait_timeout(tv);
-                    pthread_cond_timedwait(cons_c, cons_m,&tv);
-                }
+                pthread_cond_timedwait(cons_c, cons_m,&tv);
                 pthread_mutex_unlock(cons_m);
                 goto retry;
             }
@@ -595,52 +585,48 @@ protected:
     // consumer
     virtual inline bool init_input_blocking(pthread_mutex_t   *&m,
                                             pthread_cond_t    *&c,
-                                            std::atomic_ulong *&counter) {
-        if (cons_counter.load() == (unsigned long)-1) {
+                                            bool /*feedback*/=true) {
+        if (cons_m == nullptr) {
+            assert(cons_c==nullptr);
             cons_m = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t));
             cons_c = (pthread_cond_t*)malloc(sizeof(pthread_cond_t));
             assert(cons_m); assert(cons_c);
             if (pthread_mutex_init(cons_m, NULL) != 0) return false;
             if (pthread_cond_init(cons_c, NULL) != 0)  return false;
-            cons_counter.store(0);
         } 
-        m = cons_m,  c = cons_c, counter = &cons_counter;
+        m = cons_m,  c = cons_c;
         return true;
     }
-    virtual inline void set_input_blocking(pthread_mutex_t   *&m,
-                                           pthread_cond_t    *&c,
-                                           std::atomic_ulong *&counter) {
-        p_prod_m = m,  p_prod_c = c,  p_prod_counter = counter;
-    }    
-
     // producer
     virtual inline bool init_output_blocking(pthread_mutex_t   *&m,
                                              pthread_cond_t    *&c,
-                                             std::atomic_ulong *&counter) {
-        if (prod_counter.load() == (unsigned long)-1) {
+                                             bool /*feedback*/=true) {
+        if (prod_m == nullptr) {
+            assert(prod_c==nullptr);
             prod_m = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t));
             prod_c = (pthread_cond_t*)malloc(sizeof(pthread_cond_t));
             assert(prod_m); assert(prod_c);
             if (pthread_mutex_init(prod_m, NULL) != 0) return false;
             if (pthread_cond_init(prod_c, NULL) != 0)  return false;
-            prod_counter.store(0);
         } 
-        m = prod_m, c = prod_c, counter = &prod_counter;
+        m = prod_m, c = prod_c;
         return true;
     }
     virtual inline void set_output_blocking(pthread_mutex_t   *&m,
                                             pthread_cond_t    *&c,
-                                            std::atomic_ulong *&counter) {
-        p_cons_m = m, p_cons_c = c, p_cons_counter = counter;
+                                            bool canoverwrite=false) {
+        assert(canoverwrite ||
+               (p_cons_m == nullptr && p_cons_c == nullptr) ||
+               (p_cons_m == m && p_cons_c == c));
+        FF_IGNORE_UNUSED(canoverwrite);
+        p_cons_m = m, p_cons_c = c;
     }
 
     virtual inline pthread_mutex_t   &get_cons_m()       { return *cons_m;}
     virtual inline pthread_cond_t    &get_cons_c()       { return *cons_c;}
-    virtual inline std::atomic_ulong &get_cons_counter() { return cons_counter;}
 
     virtual inline pthread_mutex_t   &get_prod_m()       { return *prod_m;}
     virtual inline pthread_cond_t    &get_prod_c()       { return *prod_c;}
-    virtual inline std::atomic_ulong &get_prod_counter() { return prod_counter;}
 
     /**
      * \brief Set the ff_node to start with no input task
@@ -676,9 +662,8 @@ protected:
      *
      *  \return 0 if successful, -1 otherwise
      */
-    virtual int create_input_buffer(int nentries, bool fixedsize=true) {
+    virtual int create_input_buffer(int nentries, bool fixedsize=FF_FIXED_SIZE) {
         if (in) return -1;
-        // MA: here probably better to use p = posix_memalign to 64 bits; new (p) FFBUFFER
         in = new FFBUFFER(nentries,fixedsize);
         if (!in) return -1;
         myinbuffer=true;
@@ -686,7 +671,7 @@ protected:
         return 0;
     }
 
-    virtual int create_input_buffer_mp(int nentries, bool fixedsize=true, int neos=1) {
+    virtual int create_input_buffer_mp(int nentries, bool fixedsize=FF_FIXED_SIZE, int neos=1) {
         if (create_input_buffer(nentries,fixedsize)<0) return -1;
         // setting multi-producer push
         in->pushPMF = &FFBUFFER::mp_push;
@@ -703,7 +688,7 @@ protected:
      *
      *  \return 0 if successful, -1 otherwise
      */
-    virtual int create_output_buffer(int nentries, bool fixedsize=false) {
+    virtual int create_output_buffer(int nentries, bool fixedsize=FF_FIXED_SIZE) {
         if (out) return -1;
         out = new FFBUFFER(nentries,fixedsize); 
         if (!out) return -1;
@@ -745,10 +730,10 @@ protected:
         return 0;
     }
 
-    virtual inline int set_input(const svector<ff_node *> & w) { return -1;}
+    virtual inline int set_input(const svector<ff_node *> &) { return -1;}
     virtual inline int set_input(ff_node *) { return -1;}
     virtual inline int set_input_feedback(ff_node *) { return -1;}
-    virtual inline int set_output(const svector<ff_node *> & w) { return -1;}
+    virtual inline int set_output(const svector<ff_node *> &) { return -1;}
     virtual inline int set_output(ff_node *n) {
         return set_output_buffer(n->get_in_buffer());
     }
@@ -756,14 +741,14 @@ protected:
     virtual inline void set_input_channelid(ssize_t, bool=true) {}
     
     virtual inline void get_out_nodes(svector<ff_node*>&w) { w.push_back(this); }
-    virtual inline void get_out_nodes_feedback(svector<ff_node*>&w) {}
-    virtual inline void get_in_nodes(svector<ff_node*>&w) {}
-    virtual inline void get_in_nodes_feedback(svector<ff_node*>&w) {}
+    virtual inline void get_out_nodes_feedback(svector<ff_node*>&) {}
+    virtual inline void get_in_nodes(svector<ff_node*>&w) { w.push_back(this); }
+    virtual inline void get_in_nodes_feedback(svector<ff_node*>&) {}
     
     virtual int prepare() { prepared=true; return 0; }
     virtual int dryrun() { if (!prepared) return prepare(); return 0; }
 
-    virtual void set_scheduling_ondemand(const int inbufferentries=1) {} 
+    virtual void set_scheduling_ondemand(const int /*inbufferentries*/=1) {} 
     virtual int ondemand_buffer() const { return 0;} 
 
     
@@ -846,8 +831,11 @@ protected:
         return thread->isfrozen();
     }
 
-
-    virtual bool done() const { 
+    /**
+     * \brief checks if the node is running 
+     *
+     */
+    virtual bool done() const  {
         if (!thread) return true;
         return thread->done();
     }
@@ -896,7 +884,7 @@ public:
     void *const EOSW         = FF_EOSW;
 
     
-    ff_node(const ff_node& node):ff_node() {}
+    ff_node(const ff_node&):ff_node() {}
  
     /** 
      *  \brief Destructor, polymorphic deletion through base pointer is allowed.
@@ -985,7 +973,7 @@ public:
      * (this is not possible in the svc_end method).
      * The parameter \param id is the ID of the channel that received the EOS. 
      */
-    virtual void eosnotify(ssize_t id=-1) {}
+    virtual void eosnotify(ssize_t /*id*/=-1) {}
 
     /**
      * \brief Returns the number of EOS the node has to receive before terminating.
@@ -1007,8 +995,8 @@ public:
 
 
 #if defined(FF_TASK_CALLBACK)
-    virtual void callbackIn(void *t=NULL)  { }
-    virtual void callbackOut(void *t=NULL) { }
+    virtual void callbackIn(void * =NULL)  { }
+    virtual void callbackOut(void * =NULL) { }
 #endif
 
     /**
@@ -1220,7 +1208,7 @@ protected:
     /** 
      *  used for composition (see ff_comb)
      */
-    static inline bool ff_send_out_comp(void * task,unsigned long retry,unsigned long ticks, void *obj) {
+    static inline bool ff_send_out_comp(void * task,unsigned long /*retry*/,unsigned long /*ticks*/, void *obj) {
         return ((ff_node *)obj)->push_comp_local(task);
     }
 
@@ -1246,10 +1234,7 @@ protected:
         wttime=0;
         FFTRACE(taskcnt=0;lostpushticks=0;pushwait=0;lostpopticks=0;popwait=0;ticksmin=(ticks)-1;ticksmax=0;tickstot=0);
         
-        cons_counter.store(-1);
-        prod_counter.store(-1);
-        p_prod_m = NULL, p_prod_c = NULL, p_prod_counter = NULL;
-        p_cons_m = NULL, p_cons_c = NULL, p_cons_counter = NULL;
+        p_cons_m = NULL, p_cons_c = NULL;
 
         blocking_in = blocking_out = FF_RUNTIME_MODE;
     };
@@ -1262,10 +1247,7 @@ protected:
         wtstart = n.wtstart;
         wtstop = n.wtstop;
         wttime = n.wttime;
-        cons_counter.store(n.cons_counter.load());
-        prod_counter.store(n.prod_counter.load());
-        p_prod_m = n.p_prod_m, p_prod_c = n.p_prod_c, p_prod_counter = n.p_prod_counter;
-        p_cons_m = n.p_cons_m, p_cons_c = n.p_cons_c, p_cons_counter = n.p_cons_counter;
+        p_cons_m = n.p_cons_m, p_cons_c = n.p_cons_c;
         blocking_in = n.blocking_in;
         blocking_out = n.blocking_out;
         default_mapping = n.default_mapping;
@@ -1303,7 +1285,7 @@ protected:
         callback=cb;
         callback_arg=arg;
     }
-    virtual void registerAllGatherCallback(int (*cb)(void *,void **, void*), void * arg) {}
+    virtual void registerAllGatherCallback(int (* /*cb*/)(void *,void **, void*), void * /*arg*/) {}
 
     /* WARNING: these method must be called before the run() method */
     virtual void blocking_mode(bool blk=true) {
@@ -1486,23 +1468,15 @@ protected:
     // for the input queue
     pthread_mutex_t    *cons_m = nullptr;
     pthread_cond_t     *cons_c = nullptr;
-    std::atomic_ulong   cons_counter;
-
-    // for synchronizing with the previous multi-output stage
-    pthread_mutex_t    *p_prod_m = nullptr;
-    pthread_cond_t     *p_prod_c = nullptr;
-    std::atomic_ulong  *p_prod_counter = nullptr;
 
 
     // for the output queue
     pthread_mutex_t    *prod_m = nullptr;
     pthread_cond_t     *prod_c = nullptr;
-    std::atomic_ulong   prod_counter;
 
     // for synchronizing with the next multi-input stage
     pthread_mutex_t    *p_cons_m = nullptr;
     pthread_cond_t     *p_cons_c = nullptr;
-    std::atomic_ulong  *p_cons_counter = nullptr;
 
     bool               FF_MEM_ALIGN(blocking_in,32); 
     bool               FF_MEM_ALIGN(blocking_out,32);
@@ -1582,14 +1556,14 @@ struct ff_node_F: public ff_node_t<TIN,TOUT> {
 
 
 /* ------------------------ internal node implementations, should not be used -------- */
-    
+
 /* just a node interface for the input and output buffers 
  * This is used in the internal implementation but can be used also
  * at the user level. In this second case
  */
 struct ff_buffernode: ff_node {
     ff_buffernode() {}
-    ff_buffernode(int nentries, bool fixedsize=true, int id=-1, int multi_producer_eos=-1) {
+    ff_buffernode(int nentries, bool fixedsize=FF_FIXED_SIZE, int id=-1, int multi_producer_eos=-1) {
         set(nentries,fixedsize,id, multi_producer_eos);
     }
     // NOTE: this constructor is supposed to be used only for implementing 
@@ -1599,7 +1573,7 @@ struct ff_buffernode: ff_node {
         set_input_buffer(in);
         set_output_buffer(out);
     }
-    void set(int nentries, bool fixedsize=true, int id=-1, int multi_producer_eos=-1) {
+    void set(int nentries, bool fixedsize=FF_FIXED_SIZE, int id=-1, int multi_producer_eos=-1) {
         set_id(id);
         if (multi_producer_eos<0) {
             if (create_input_buffer(nentries,fixedsize) < 0) {
@@ -1620,17 +1594,14 @@ struct ff_buffernode: ff_node {
         // blocking stuff
         pthread_mutex_t   *m        = NULL;
         pthread_cond_t    *c        = NULL;
-        std::atomic_ulong *counter  = NULL;            
-        if (!ff_node::init_output_blocking(m,c,counter)) {
+        if (!ff_node::init_output_blocking(m,c)) {
             error("buffernode, FATAL ERROR, init input blocking mode for accelerator\n");
             return -1;
         }
-        ff_node::set_input_blocking(m,c,counter);            
-        if (!ff_node::init_input_blocking(m,c,counter)) {
+        if (!ff_node::init_input_blocking(m,c)) {
             error("buffernode, FATAL ERROR, init input blocking mode for accelerator\n");
             return -1;
         }
-        ff_node::set_output_blocking(m,c,counter);
         return 0;
     }
     
@@ -1654,21 +1625,22 @@ protected:
 
     pthread_mutex_t   &get_cons_m()       { return *p_cons_m;}
     pthread_cond_t    &get_cons_c()       { return *p_cons_c;}
-    std::atomic_ulong &get_cons_counter() { return *p_cons_counter;}
 
-    pthread_mutex_t   &get_prod_m()       { return *p_prod_m;}
-    pthread_cond_t    &get_prod_c()       { return *p_prod_c;}
-    std::atomic_ulong &get_prod_counter() { return *p_prod_counter;}
-    
 
-    // REMEMBER: 
+    // New Blocking protocol (both for bounded and unbounded buffer):
     // init_output_blocking initializes prod_*
     // set_output_blocking sets p_cons_*
     // init_input_blocking initializes cons_*
-    // set_input_blocking  sets p_prod_*
 
-    // send   : if ok then 'p_cons_m' else 'prod_m'
-    // receive: if ok then 'p_prod_m' else 'cons_m'
+    // sender:
+    //   empty=channel.empty();
+    //   r=channel.send()
+    //   if (!r) timewait(prod_c);
+    //   if empty then signal(p_cons_c) // the channel was empty
+
+    // receive:
+    //  r=channel.receive()
+    //  if (!r) timewait(cons_c);       // channel empty
 };
 
 

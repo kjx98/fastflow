@@ -90,12 +90,11 @@ protected:
         //
         // the previous stage is a multi-output node:
         //          - it's a farm with a multi-output collector                                  [prev_single_multioutput]
-        //          - it's a farm without collecto and workers are standard node                 [prev_multi_standard]
+        //          - it's a farm without collector and workers are standard node                [prev_multi_standard]
         //          - it's a farm without collector with multi-output workers                    [prev_multi_multioutput]
         //          - it's a all2all with standard nodes                                         [prev_multi_standard]
         //          - it's a all2all with multi-output nodes                                     [prev_multi_multioutput]
         //          - it's a single node (comp or pipeline) with the last stage multi-output     [prev_single_multioutput]
-        //
         //
         //
         for(int i=1;i<nstages;++i) {            
@@ -153,12 +152,15 @@ protected:
             
             pthread_mutex_t   *m        = NULL;
             pthread_cond_t    *c        = NULL;
-            std::atomic_ulong *counter  = NULL;
             if (curr_single_standard) {
+                bool skip_set_output_blocking = false;
                 if (nodes_list[i]->create_input_buffer(in_buffer_entries, fixedsize)<0)  return -1;
                 if (prev_single_standard) {
                     if (nodes_list[i-1]->set_output_buffer(nodes_list[i]->get_in_buffer())<0) return -1;
                 } else {
+                    skip_set_output_blocking = true;
+                    // WARNING: here we add as output node of the previous stage the
+                    //          current node and not a buffer-node.                      
                     if (prev_multi_standard || prev_multi_multioutput) {                        
                         svector<ff_node*> w(1);
                         nodes_list[i-1]->get_out_nodes(w);
@@ -173,16 +175,16 @@ protected:
                     }
                 }
                 // blocking stuff --------------------------------------------
-                if (!nodes_list[i]->init_input_blocking(m,c,counter)) {
+                if (!nodes_list[i]->init_input_blocking(m,c)) {
                     error("PIPE, init input blocking mode for node %d\n", i);
                     return -1;
-                }
-                nodes_list[i-1]->set_output_blocking(m,c,counter);
-                if (!nodes_list[i-1]->init_output_blocking(m,c,counter)) {
+                }                
+                if (!skip_set_output_blocking) // we do not wait to overwrite previous setting
+                    nodes_list[i-1]->set_output_blocking(m,c); 
+                if (!nodes_list[i-1]->init_output_blocking(m,c,false)) {
                     error("PIPE, init output blocking mode for node %d\n", i-1);
                     return -1;
                 }
-                nodes_list[i]->set_input_blocking(m,c,counter);
                 // ------------------------------------------------------------
             }
             if (curr_single_multiinput) {
@@ -191,16 +193,17 @@ protected:
                     if (nodes_list[i]->set_input(nodes_list[i-1])<0) return -1;
 
                     // blocking stuff --------------------------------------------
-                    if (!nodes_list[i]->init_input_blocking(m,c,counter)) {
+                    if (!nodes_list[i]->init_input_blocking(m,c)) {
                         error("PIPE, init input blocking mode for node %d\n", i);
                         return -1;
                     }
-                    nodes_list[i-1]->set_output_blocking(m,c,counter);
-                    if (!nodes_list[i-1]->init_output_blocking(m,c,counter)) {
+                    // since the curr node is multi-input, the following op has been executed
+                    // by the previous one.
+                    //nodes_list[i-1]->set_output_blocking(m,c);
+                    if (!nodes_list[i-1]->init_output_blocking(m,c)) {
                         error("PIPE, init output blocking mode for node %d\n", i-1);
                         return -1;
                     }
-                    nodes_list[i]->set_input_blocking(m,c,counter);
                     // ------------------------------------------------------------
                 } else {
                     if (prev_single_multioutput) {
@@ -230,7 +233,7 @@ protected:
                         }                    
                     }
                     // blocking stuff --------------------------------------------
-                    if (!nodes_list[i]->init_input_blocking(m,c,counter)) {
+                    if (!nodes_list[i]->init_input_blocking(m,c)) {
                         error("PIPE, init input blocking mode for node %d\n", i);
                         return -1;
                     }
@@ -239,9 +242,9 @@ protected:
                     assert(w.size());
                     for(size_t j=0;j<w.size();++j) {
                         // we set p_cons_* for each buffernode
-                        w[j]->set_output_blocking(m,c,counter);
+                        w[j]->set_output_blocking(m,c);
                     }
-                    if (!nodes_list[i-1]->init_output_blocking(m,c,counter)) {
+                    if (!nodes_list[i-1]->init_output_blocking(m,c)) {
                         error("PIPE, init output blocking mode for node %d\n", i);
                         return -1;
                     }
@@ -276,13 +279,12 @@ protected:
                         nodes_list[i]->get_in_nodes(w);
                         assert(w.size() == W1.size());
                         for(size_t j=0;j<w.size();++j) {
-                            if (!W1[j]->init_input_blocking(m,c,counter)) return -1;
-                            w[j]->set_output_blocking(m,c,counter);
+                            if (!W1[j]->init_input_blocking(m,c)) return -1;
+                            w[j]->set_output_blocking(m,c);
                             
-                            if (!w[j]->init_output_blocking(m,c,counter)) return -1;
-                            W1[j]->set_input_blocking(m,c,counter);
+                            if (!w[j]->init_output_blocking(m,c)) return -1;
                         }                                        
-                        if (!nodes_list[i-1]->init_output_blocking(m,c,counter)) {
+                        if (!nodes_list[i-1]->init_output_blocking(m,c)) {
                             error("PIPE, init output blocking mode for node %d\n", i-1);
                             return -1;
                         }
@@ -314,11 +316,10 @@ protected:
                         nodes_list[i-1]->get_out_nodes(w);
                         assert(w.size());
                         for(size_t i=0;i<w.size();++i) {
-                            if (!W1[i]->init_input_blocking(m,c,counter)) return -1;
-                            w[i]->set_output_blocking(m,c,counter);
+                            if (!W1[i]->init_input_blocking(m,c)) return -1;
+                            w[i]->set_output_blocking(m,c);
                             
-                            if (!w[i]->init_output_blocking(m,c,counter)) return -1;
-                            W1[i]->set_input_blocking(m,c,counter);
+                            if (!w[i]->init_output_blocking(m,c)) return -1;
                         }       
                         // -----------------------------------------------------------
                     }
@@ -388,18 +389,17 @@ protected:
                     nodes_list[i-1]->get_out_nodes(w);
                     assert(w.size());
                     for(size_t i=0;i<w.size();++i) {
-                        if (!W1[i]->init_input_blocking(m,c,counter)) return -1;
-                        w[i]->set_output_blocking(m,c,counter);
+                        if (!W1[i]->init_input_blocking(m,c)) return -1;
+                        w[i]->set_output_blocking(m,c);
                         
-                        if (!w[i]->init_output_blocking(m,c,counter)) return -1;
-                        W1[i]->set_input_blocking(m,c,counter);
+                        if (!w[i]->init_output_blocking(m,c)) return -1;
                     }
                 } else {
-                    if (!a2a->init_input_blocking(m,c,counter)) {
+                    if (!a2a->init_input_blocking(m,c)) {
                         error("PIPE, init input blocking mode for node %d\n", i);
                         return -1;
                     }
-                    if (!nodes_list[i-1]->init_output_blocking(m,c,counter)) {
+                    if (!nodes_list[i-1]->init_output_blocking(m,c)) {
                         error("PIPE, init output blocking mode for node %d\n", i-1);
                         return -1;
                     }
@@ -430,41 +430,36 @@ protected:
 
             pthread_mutex_t   *m        = NULL;
             pthread_cond_t    *c        = NULL;
-            std::atomic_ulong *counter  = NULL;
 
             // set blocking input for the first stage (cons_m,...)
-            if (!init_input_blocking(m,c,counter)) {
+            if (!init_input_blocking(m,c)) {
                 error("PIPE, init input blocking mode for accelerator\n");
             }
             // set my pointers to the first stage input blocking stuff
-            ff_node::set_output_blocking(m,c,counter);
+            ff_node::set_output_blocking(m,c);
             
-            m=NULL,c=NULL,counter=NULL;
+            m=NULL,c=NULL;
 
             // set my blocking output (prod_m, ....)
-            if (!ff_node::init_output_blocking(m,c,counter)) {
+            if (!ff_node::init_output_blocking(m,c)) {
                 error("PIPE, init output blocking mode for accelerator\n");
             }
-            // give pointers to pipeline first stage (p_prod_m, ...)
-            set_input_blocking(m,c,counter);
 
-            m=NULL,c=NULL,counter=NULL;
+            m=NULL,c=NULL;
 
             // pipeline's first stage blocking output stuff (prod_m, ....)
-            if (!init_output_blocking(m,c,counter)) {
+            if (!init_output_blocking(m,c)) {
                 error("FARM, add_collector, init input blocking mode for accelerator\n");
             }
-            // set my pointers (p_prod_m,....)
-            ff_node::set_input_blocking(m,c,counter);
 
-            m=NULL,c=NULL,counter=NULL;
+            m=NULL,c=NULL;
             
             // set my blocking input (cons_m, ....)
-            if (!ff_node::init_input_blocking(m,c,counter)) {
+            if (!ff_node::init_input_blocking(m,c)) {
                 error("PIPE, init input blocking mode for accelerator\n");
             }
             // give pointers to my blocking input to the last pipeline stage (p_cons_m,...)
-            set_output_blocking(m,c,counter);
+            set_output_blocking(m,c);
         }
 
         prepared=true; 
@@ -506,7 +501,9 @@ protected:
 
 public:
  
-    enum { DEF_IN_BUFF_ENTRIES=512, DEF_OUT_BUFF_ENTRIES=(DEF_IN_BUFF_ENTRIES+128)};
+    enum { DEF_IN_BUFF_ENTRIES=DEFAULT_BUFFER_CAPACITY,
+           DEF_IN_OUT_DIFF=DEFAULT_IN_OUT_CAPACITY_DIFFERENCE,
+           DEF_OUT_BUFF_ENTRIES=(DEF_IN_BUFF_ENTRIES+DEF_IN_OUT_DIFF)};
 
     /**
      *  \brief Constructor
@@ -519,14 +516,14 @@ public:
     explicit ff_pipeline(bool input_ch=false,
                          int in_buffer_entries=DEF_IN_BUFF_ENTRIES,
                          int out_buffer_entries=DEF_OUT_BUFF_ENTRIES, 
-                         bool fixedsize=false):   // NOTE: by default the queues are unbounded!!!!
+                         bool fixedsize=FF_FIXED_SIZE):  
         has_input_channel(input_ch),
         node_cleanup(false),fixedsize(fixedsize),
         in_buffer_entries(in_buffer_entries),
         out_buffer_entries(out_buffer_entries) {            
     }
 
-    ff_pipeline(const ff_pipeline& p) {
+    ff_pipeline(const ff_pipeline& p) : ff_node(p) {
         if (p.prepared) {
             error("ff_pipeline, copy constructor, the input pipeline is already prepared\n");
             return;
@@ -608,8 +605,13 @@ public:
         return add_stage(newstage, true);
     }
 
-    /* remove one stage of the pipeline. The node is not deleted if cleanup is set. */
-    void remove_stage(int pos) {
+    /* remove one stage already inserted into the pipeline. 
+     * NOTE: The node is not deleted if the pipeline cleanup flag is set.
+     * NOTE: If remove_from_cleanuplist is true the node is removed (if it is present)
+     *       from the list of internalSupportNodes. 
+     *
+     */
+    void remove_stage(int pos, bool remove_from_cleanuplist=false) {
         if (prepared) {
             error("PIPE, remove_stage, stage %d cannot be removed because the PIPE has already been prepared\n");
             return;
@@ -620,6 +622,13 @@ public:
         }
         svector<ff_node*>::iterator it=nodes_list.begin();
         assert(it+pos < nodes_list.end());
+        if (remove_from_cleanuplist) {
+            ff_node* node = nodes_list[pos];
+            int pos2=-1;
+            for(size_t i=0;i<internalSupportNodes.size();++i)
+                if (internalSupportNodes[i] == node) { pos2 = i; break; }
+            if (pos2>=0) internalSupportNodes.erase(internalSupportNodes.begin()+pos2);            
+        }        
         nodes_list.erase(it+pos);
     }
     void insert_stage(int pos, ff_node* node, bool cleanup=false) {
@@ -686,7 +695,7 @@ public:
         //
         // the last stage is a multi-output node:
         //          - it's a farm with a multi-output collector                                  [last_single_multioutput]
-        //          - it's a farm without collecto and workers are standard node                 [last_multi_standard]
+        //          - it's a farm without collector and workers are standard nodes                 [last_multi_standard]
         //          - it's a farm without collector with multi-output workers                    [last_multi_multioutput]
         //          - it's a all2all with standard nodes                                         [last_multi_standard]
         //          - it's a all2all with multi-output nodes                                     [last_multi_multioutput]
@@ -748,11 +757,33 @@ public:
         // first stage: standard node
         if (first_single_standard) {
             if (create_input_buffer(out_buffer_entries, false)<0) return -1;
-            if (last_single_standard) {                
+            if (last_single_standard) {
                 if (set_output_buffer(get_in_buffer())<0)  return -1;
+
+                // blocking stuff ------
+                pthread_mutex_t   *m        = NULL;
+                pthread_cond_t    *c        = NULL;
+                if (!nodes_list[last]->init_output_blocking(m,c)) return -1;
+                if (!nodes_list[0]->init_input_blocking(m,c)) return -1;
+                nodes_list[last]->set_output_blocking(m,c);
+                // ---------------------
             } else {
                 if (last_single_multioutput) {
-                    nodes_list[last]->set_output_feedback(nodes_list[0]);
+                    ff_node *t = new ff_buffernode(last, get_in_buffer(), get_in_buffer());
+                    internalSupportNodes.push_back(t);
+                    assert(t);                   
+                    nodes_list[last]->set_output_feedback(t);
+                    
+                    // blocking stuff ------
+                    pthread_mutex_t   *m        = NULL;
+                    pthread_cond_t    *c        = NULL;
+                    if (!nodes_list[last]->init_output_blocking(m,c)) return -1;
+                    if (!nodes_list[0]->init_input_blocking(m,c)) return -1;
+                    // NOTE: if the node0 is multi-input, then the init_input_blocking
+                    //       method already calls set_output_blocking
+                    t->set_output_blocking(m,c);
+                    // ---------------------
+                    
                 } else {
                     error("PIPE, cannot connect stage %d with node %d\n", last, 0);
                     return -1;                                        
@@ -764,8 +795,16 @@ public:
         if (first_single_multiinput) {
 
             if (last_single_standard) {
-                if (nodes_list[last]->create_output_buffer(out_buffer_entries, false)<0) return -1;
+                if (nodes_list[last]->create_output_buffer(out_buffer_entries,false)<0) return -1;
                 nodes_list[0]->set_input_feedback(nodes_list[last]);
+
+                // blocking stuff ......
+                pthread_mutex_t   *m        = NULL;
+                pthread_cond_t    *c        = NULL;
+                if (!nodes_list[last]->init_output_blocking(m,c)) return -1;
+                // multi-input nodes execute set_output_blocking
+                if (!nodes_list[0]->init_input_blocking(m,c)) return -1;
+                // ---------------------
             } else {
                 if (last_single_multioutput) {
                     ff_node *t = new ff_buffernode(out_buffer_entries,false, last); 
@@ -773,15 +812,31 @@ public:
                     internalSupportNodes.push_back(t);
                     nodes_list[last]->set_output_feedback(t);
                     nodes_list[0]->set_input_feedback(t);
+
+                    // blocking stuff ......
+                    pthread_mutex_t   *m        = NULL;
+                    pthread_cond_t    *c        = NULL;
+                    if (!nodes_list[last]->init_output_blocking(m,c)) return -1;
+                    // multi-input nodes execute set_output_blocking
+                    if (!nodes_list[0]->init_input_blocking(m,c)) return -1;
+                    // ---------------------
                 } else {
                     if (last_multi_standard) {
+                        if (nodes_list[last]->create_output_buffer(out_buffer_entries, false) <0)
+                            return -1;
                         svector<ff_node*> w(MAX_NUM_THREADS);
                         nodes_list[last]->get_out_nodes(w);
                         assert(w.size());
-
-                        if (nodes_list[last]->create_output_buffer(out_buffer_entries, false) <0)  return -1;
                         for(size_t j=0;j<w.size();++j)
                             nodes_list[0]->set_input_feedback(w[j]);
+
+                        // blocking stuff ......
+                        pthread_mutex_t   *m        = NULL;
+                        pthread_cond_t    *c        = NULL;
+                        if (!nodes_list[last]->init_output_blocking(m,c)) return -1;
+                        // multi-input nodes execute set_output_blocking
+                        if (!nodes_list[0]->init_input_blocking(m,c)) return -1;
+                        // ---------------------
                     } else {
                         if (last_multi_multioutput) {
                             svector<ff_node*> w(MAX_NUM_THREADS);
@@ -795,6 +850,14 @@ public:
                                 nodes_list[0]->set_input_feedback(t);
                                 w[j]->set_output_feedback(t);
                             }                            
+
+                            // blocking stuff ......
+                            pthread_mutex_t   *m        = NULL;
+                            pthread_cond_t    *c        = NULL;
+                            if (!nodes_list[last]->init_output_blocking(m,c)) return -1;
+                            // multi-input nodes execute set_output_blocking
+                            if (!nodes_list[0]->init_input_blocking(m,c)) return -1;
+                            // ---------------------                            
                         } else {
                             error("PIPE, wrap_around invalid stage\n");
                             return -1;
@@ -822,7 +885,19 @@ public:
                     internalSupportNodes.push_back(t);
                     firstSet[j]->set_input(t);
                     nodes_list[last]->set_output_feedback(t);
+                    
+                    // blocking stuff ......
+                    pthread_mutex_t   *m        = NULL;
+                    pthread_cond_t    *c        = NULL;                    
+                    if (!firstSet[j]->init_input_blocking(m,c)) return -1;
+                    t->set_output_blocking(m,c);
+                    // ---------------------                            
                 }
+                // blocking stuff ......
+                pthread_mutex_t   *m        = NULL;
+                pthread_cond_t    *c        = NULL;
+                nodes_list[last]->init_output_blocking(m,c);
+                // ---------------------                            
             }
             if (last_multi_standard) {
                 svector<ff_node*> w(MAX_NUM_THREADS);
@@ -832,7 +907,17 @@ public:
 
                 if (a2a->create_input_buffer(in_buffer_entries, false)<0) return -1;
                 for(size_t j=0;j<w.size();++j)
-                    w[j]->set_output_buffer(firstSet[j]->get_in_buffer()); 
+                    w[j]->set_output_buffer(firstSet[j]->get_in_buffer());
+
+                // blocking stuff ......
+                pthread_mutex_t   *m        = NULL;
+                pthread_cond_t    *c        = NULL;
+                if (!a2a->init_output_blocking(m,c)) return -1;
+                for(size_t j=0;j<w.size();++j) {
+                    if (!firstSet[j]->init_input_blocking(m,c)) return -1;
+                    w[j]->set_output_blocking(m,c);
+                }
+                // ---------------------                                            
             }
             if (last_multi_multioutput) {
                 error("PIPE, wrap_around, cannot connect last stage with first stage\n");
@@ -857,7 +942,7 @@ public:
                     internalSupportNodes.push_back(t);
                     firstSet[j]->set_input_feedback(t);
                     nodes_list[last]->set_output_feedback(t);
-                }
+                }                                                         
             }
             if (last_multi_standard) {
                 svector<ff_node*> w(MAX_NUM_THREADS);
@@ -889,83 +974,14 @@ public:
                     }
                 }
             }
+            // blocking stuff ......
+            pthread_mutex_t   *m        = NULL;
+            pthread_cond_t    *c        = NULL;
+            if (!nodes_list[last]->init_output_blocking(m,c)) return -1;
+            if (!nodes_list[0]->init_input_blocking(m,c)) return -1;
+            // ---------------------              
             nodes_list[0]->skipfirstpop(true);
         }        
-        
-        // ------------------------------------------------------------
-        // blocking stuff for the first and last stage of the pipeline
-        pthread_mutex_t   *m        = NULL;
-        pthread_cond_t    *c        = NULL;
-        std::atomic_ulong *counter  = NULL;
-        if (last_single_standard) {
-            if (!nodes_list[last]->init_output_blocking(m,c,counter)) return -1;
-            nodes_list[0]->set_input_blocking(m,c,counter);
-        }
-        if (first_single_standard) {               
-            if (!nodes_list[0]->init_input_blocking(m,c,counter)) return -1;
-            nodes_list[last]->set_output_blocking(m,c,counter);
-        }
-        if (last_single_multioutput || last_multi_multioutput) {
-            if (!nodes_list[last]->init_output_blocking(m,c,counter)) return -1;
-        }
-        if (first_single_multiinput || first_multi_multiinput) {
-            if (!nodes_list[0]->init_input_blocking(m,c,counter)) return -1;
-
-            // the first stage is the farm's emitter that is not a plain multi-input node
-            if (get_node(0)->isFarm()) { 
-                svector<ff_node*> w1(MAX_NUM_THREADS);
-                if (last_single_standard || last_multi_standard) {
-                    nodes_list[last]->get_out_nodes(w1);
-                } else
-                    nodes_list[last]->get_out_nodes_feedback(w1);
-                
-                if (w1.size() == 0) {
-                    assert(last_single_standard);
-                    nodes_list[last]->set_output_blocking(m,c,counter);  // <----
-                } else {
-                    for(size_t i=0;i<w1.size();++i)
-                        w1[i]->set_output_blocking(m,c,counter);
-                }
-            }
-        }
-        if (last_multi_standard) {
-            if (first_multi_standard) {
-                svector<ff_node*> w1(MAX_NUM_THREADS);
-                nodes_list[last]->get_out_nodes(w1);
-                svector<ff_node*> w2(MAX_NUM_THREADS);
-                nodes_list[0]->get_in_nodes(w2);
-                assert(w1.size() == w2.size());
-                for(size_t i=0;i<w1.size();++i) {
-                    if (!w1[i]->init_output_blocking(m,c,counter)) return -1;
-                    w2[i]->set_input_blocking(m,c,counter);
-                    if (!w2[i]->init_input_blocking(m,c,counter)) return -1;
-                    w1[i]->set_output_blocking(m,c,counter);
-                }      
-            } else {
-                assert(first_single_multiinput || first_multi_multiinput);
-                if (first_single_multiinput) {                                        
-                    svector<ff_node*> w1(MAX_NUM_THREADS);
-                    nodes_list[last]->get_out_nodes(w1);
-                    for(size_t i=0;i<w1.size();++i)
-                        if (!w1[i]->init_output_blocking(m,c,counter)) return -1;
-                    if (!nodes_list[0]->init_input_blocking(m,c,counter)) return -1;
-                    for(size_t i=0;i<w1.size();++i)
-                        w1[i]->set_output_blocking(m,c,counter);
-                } else {
-                    svector<ff_node*> w1(MAX_NUM_THREADS);
-                    nodes_list[last]->get_out_nodes(w1);
-                    svector<ff_node*> w2(MAX_NUM_THREADS);
-                    nodes_list[0]->get_in_nodes_feedback(w2);  // questi sono tutti ff_buffernode
-                    assert(w2.size() == w1.size());
-                    for(size_t i=0;i<w1.size();++i) {
-                        if (!w1[i]->init_output_blocking(m,c,counter)) return -1;
-                        w2[i]->set_input_blocking(m,c,counter);
-                        if (!w2[i]->init_input_blocking(m,c,counter)) return -1;
-                        w1[i]->set_output_blocking(m,c,counter);
-                    }
-                }
-            }
-        }
 
         return 0;
     }
@@ -1220,6 +1236,10 @@ public:
         for(unsigned int i=0;i<nodes_list.size();++i) nodes_list[i]->freeze();
     }
 
+    /**
+     * \brief checks if the pipeline is still running or not
+     *
+     */
     inline bool done() const { 
         int nstages=static_cast<int>(nodes_list.size());
         for(int i=0;i<nstages;++i) 
@@ -1272,17 +1292,13 @@ public:
          if (ff_node::blocking_out) {
          _retry:
              if (inbuffer->push(task)) {
-                 ++(*p_cons_counter);
-                 ++prod_counter;
                  pthread_cond_signal(p_cons_c);
                  return true;
              } 
+             struct timespec tv;
+             timedwait_timeout(tv);             
              pthread_mutex_lock(prod_m);
-             if (prod_counter.load() >= (inbuffer->buffersize())) {
-                 struct timespec tv;
-                 timedwait_timeout(tv);
-                 pthread_cond_timedwait(prod_c, prod_m, &tv);
-             }
+             pthread_cond_timedwait(prod_c, prod_m, &tv);
              pthread_mutex_unlock(prod_m);
              goto _retry;
          }
@@ -1322,19 +1338,13 @@ public:
         if (ff_node::blocking_in) {
         _retry:
             if (outbuffer->pop(task)) {
-                --(*p_prod_counter);
-                --cons_counter;
-                pthread_cond_signal(p_prod_c);
-                
                 if ((*task != (void *)FF_EOS)) return true;
                 else return false;
             }
+            struct timespec tv;
+            timedwait_timeout(tv);
             pthread_mutex_lock(cons_m);
-            if (cons_counter.load() == 0) {
-                struct timespec tv;
-                timedwait_timeout(tv);
-                pthread_cond_timedwait(cons_c, cons_m, &tv);
-            }
+            pthread_cond_timedwait(cons_c, cons_m, &tv);
             pthread_mutex_unlock(cons_m);
             goto _retry;
         }
@@ -1431,6 +1441,13 @@ protected:
         nodes_list[last]->get_out_nodes(w);
     }
 
+    inline void get_out_nodes_feedback(svector<ff_node*>&w) {
+        assert(nodes_list.size()>0);
+        int last = static_cast<int>(nodes_list.size())-1;
+        nodes_list[last]->get_out_nodes_feedback(w);
+    }
+
+    
     inline void get_in_nodes(svector<ff_node*>&w) {
         assert(nodes_list.size()>0);
         nodes_list[0]->get_in_nodes(w);
@@ -1443,11 +1460,14 @@ protected:
     inline bool  put(void * ptr) { 
         return nodes_list[0]->put(ptr);
     }
+    inline FFBUFFER * get_in_buffer() const {
+        return nodes_list[0]->get_in_buffer();
+    }
     
     // returns the pipeline starting time
     const struct timeval startTime() { return nodes_list[0]->getstarttime(); }
 
-    void* svc(void * task) { return NULL; }    
+    void* svc(void *) { return NULL; }    
     int   svc_init() { return -1; };    
     void  svc_end()  {}
 
@@ -1471,34 +1491,27 @@ protected:
     // consumer
     virtual inline bool init_input_blocking(pthread_mutex_t   *&m,
                                             pthread_cond_t    *&c,
-                                            std::atomic_ulong *&counter) {
-        return nodes_list[0]->init_input_blocking(m,c,counter);
+                                            bool /*feedback*/=true) {
+        return nodes_list[0]->init_input_blocking(m,c);
     }
-    virtual inline void set_input_blocking(pthread_mutex_t   *&m,
-                                           pthread_cond_t    *&c,
-                                           std::atomic_ulong *&counter) {
-        nodes_list[0]->set_input_blocking(m,c,counter);
-    }    
-
     // producer
     virtual inline bool init_output_blocking(pthread_mutex_t   *&m,
                                              pthread_cond_t    *&c,
-                                             std::atomic_ulong *&counter) {
+                                             bool /*feedback*/=true) {
         const int last = static_cast<int>(nodes_list.size())-1;
         if (last<0) return false;
-        return nodes_list[last]->init_output_blocking(m,c,counter);
+        return nodes_list[last]->init_output_blocking(m,c);
     }
     virtual inline void set_output_blocking(pthread_mutex_t   *&m,
                                             pthread_cond_t    *&c,
-                                            std::atomic_ulong *&counter) {
+                                            bool canoverwrite=false) {
         const int last = static_cast<int>(nodes_list.size())-1;
         if (last<0) return;
-        nodes_list[last]->set_output_blocking(m,c,counter);
+        nodes_list[last]->set_output_blocking(m,c, canoverwrite);
     }
 
     virtual inline pthread_mutex_t   &get_cons_m()        { return nodes_list[0]->get_cons_m();}
     virtual inline pthread_cond_t    &get_cons_c()        { return nodes_list[0]->get_cons_c();}
-    virtual inline std::atomic_ulong &get_cons_counter()  { return nodes_list[0]->get_cons_counter();}
 
     virtual inline pthread_mutex_t &get_prod_m()        { 
         const int last = static_cast<int>(nodes_list.size())-1;
@@ -1507,10 +1520,6 @@ protected:
     virtual inline pthread_cond_t  &get_prod_c()        { 
         const int last = static_cast<int>(nodes_list.size())-1;
         return nodes_list[last]->get_prod_c();
-    }
-    virtual inline std::atomic_ulong  &get_prod_counter()  { 
-        const int last = static_cast<int>(nodes_list.size())-1;
-        return nodes_list[last]->get_prod_counter();
     }
 
     int create_input_buffer(int nentries, bool fixedsize) { 
@@ -1564,7 +1573,12 @@ protected:
     }
     inline int set_output_feedback(ff_node *node) {
         int last = static_cast<int>(nodes_list.size())-1;
-        return nodes_list[last]->set_output_feedback(node);
+
+        if (nodes_list[last]->isMultiOutput())
+            return nodes_list[last]->set_output_feedback(node);
+
+        assert(node->get_out_buffer());
+        return nodes_list[last]->set_output_buffer(node->get_out_buffer());
     }
 
 

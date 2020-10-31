@@ -82,6 +82,9 @@ struct Sink: ff_node_t<long> {
 
 struct Router: ff_monode_t<long> {
     long *svc(long *in) {
+
+        printf("Router%ld received %ld\n", get_my_id(), *in);
+
         if ((*in % 2) == 0) {
             ff_send_out_to(in, 0);
         } else
@@ -97,7 +100,7 @@ struct Even: ff_node_t<long> {
         delete in;
 	    return GO_ON;
     }
-    void eosnotify(ssize_t id=-1) {
+    void eosnotify(ssize_t=-1) {
         printf("Even EOS received\n");
         ff_send_out(new long(sum));
     }
@@ -110,12 +113,18 @@ struct Odd: ff_node_t<long> {
         delete in;
 	    return GO_ON;
     }
-    void eosnotify(ssize_t id=-1) {
+    void eosnotify(ssize_t=-1) {
         printf("Odd EOS received\n");
         ff_send_out(new long(sum));
     }
 
     long sum=0;
+};
+
+struct doNothing: ff_node_t<long> {
+    long *svc(long *in) {
+        return in;
+    }
 };
 
 
@@ -126,6 +135,7 @@ int main() {
     W1.push_back(&w1);
     W1.push_back(&w2);
     W1.push_back(&w3);
+
     std::vector<ff_node*> W2;
     Even even;
     Odd  odd;
@@ -140,13 +150,21 @@ int main() {
     ff_a2a a2a;
     a2a.add_firstset(W1);
     a2a.add_secondset(W2);
-        
+
+    std::vector<ff_node* > W;    
+#if 1
+    // to test combine_with_firststage
+    ff_pipeline fakepipe;
+    fakepipe.add_stage(&a2a);
+    combine_with_firststage(fakepipe, new doNothing, true);
+    
+    W.push_back(&fakepipe);    
+#else
+    W.push_back(&a2a);
+#endif
+
     Generator gen;
     Sink      sink;
-        
-    std::vector<ff_node* > W;
-    W.push_back(&a2a);
-        
     ff_farm farm(W, &gen, &sink);        
     if (farm.run_and_wait_end()<0) {
         error("running farm\n");

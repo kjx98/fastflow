@@ -25,12 +25,12 @@
  ****************************************************************************
  */
 /*
- * This is a variant of test_comp3. In this case we have a second emitter stage 
- * that does some work and we want to combine the two farms.
  *
- *
- *  combine(farm1(E,Worker),farm2(Worker1,E2, C)) -> 
- *                                     -> farm(E, A2A(comp(Worker, E2), Worker1), C)
+ *  combine(farm1(E,Worker),farm2(E2, Worker1, C)) -------
+ *                         ______________________________|      
+ *                        | 
+ *                        |
+ *                         ----> farm(E, A2A(comp(Worker, E2), Worker1), C)
  *
  *
  *            |<------------------- A2A --------------------->| 
@@ -85,7 +85,7 @@ struct Worker1: ff_node_t<long> {
 
 struct Collector: ff_minode_t<long> {
     Collector(long ntasks):ntasks(ntasks) {}
-    long *svc(long *in) {
+    long *svc(long *) {
         --ntasks;
         //std::cout << "Collector received input from " << get_channel_id() << "\n";
         return GO_ON;

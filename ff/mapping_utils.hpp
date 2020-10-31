@@ -55,7 +55,8 @@
  #include <stdio.h>
  #include <unistd.h>
 
-static inline int gettid() { return syscall(__NR_gettid);}
+static inline int ff_gettid() { return syscall(__NR_gettid);}
+
 #if defined(MAMMUT)
 #include <mammut/mammut.hpp>
 #endif
@@ -89,7 +90,7 @@ static inline int gettid() { return syscall(__NR_gettid);}
  */
 static inline size_t ff_getThreadID() {
 #if (defined(__GNUC__) && defined(__linux))
-    return  gettid();
+    return  ff_gettid();
 #elif defined(__APPLE__) && MAC_OS_X_HAS_AFFINITY
     //uint64_t tid;
     // pthread_getthreadid_np(NULL, &tid); // MA: for some reasons does nto works (it was working)
@@ -142,6 +143,7 @@ static inline unsigned long ff_getCpuFreq() {
  *  \return An integer value showing the number of cores.
  */
 static inline ssize_t ff_numCores() {
+    if (FF_NUM_CORES != -1) return FF_NUM_CORES;
     ssize_t  n=-1;
 #if defined(__linux__)    
 #if defined(MAMMUT)
@@ -209,6 +211,7 @@ static inline ssize_t ff_numCores() {
  *  \return An integer value showing the number of cores.
  */
 static inline ssize_t ff_realNumCores() {
+    if (FF_NUM_REAL_CORES != -1) return FF_NUM_REAL_CORES;
     ssize_t  n=-1;
 #if defined(_WIN32)
 	n = 2; // Not yet implemented
@@ -268,13 +271,13 @@ static inline ssize_t ff_realNumCores() {
                 if (!found) S.insert(i);                
                 if (--cnt==0) {
                     n=0;
-                    std::for_each(S.begin(), S.end(), [&n](int const& i) { ++n;});
+                    std::for_each(S.begin(), S.end(), [&n](int const&) { ++n;});
                     return n;
                 }
             }
         }
         n=0;
-        std::for_each(S.begin(), S.end(), [&n](int const& i) { ++n;});
+        std::for_each(S.begin(), S.end(), [&n](int const&) { ++n;});
         return n;
     } while(0);
 #endif // HAVE_PTHREAD_SETAFFINITY_NP
@@ -362,7 +365,7 @@ static inline ssize_t ff_setPriority(ssize_t priority_level=0) {
     ssize_t ret=0;
 #if (defined(__GNUC__) && defined(__linux))
     //if (priority_level) {
-        if (setpriority(PRIO_PROCESS, gettid(), priority_level) != 0) {
+        if (setpriority(PRIO_PROCESS, ff_gettid(), priority_level) != 0) {
             perror("setpriority:");
             ret = EINVAL;
         }
@@ -420,7 +423,7 @@ static inline ssize_t ff_getMyCore() {
 #if defined(__linux__) && defined(CPU_SET)
     cpu_set_t mask;
     CPU_ZERO(&mask);
-    if (sched_getaffinity(gettid(), sizeof(mask), &mask) != 0) {
+    if (sched_getaffinity(ff_gettid(), sizeof(mask), &mask) != 0) {
         perror("sched_getaffinity");
         return EINVAL;
     }
@@ -465,7 +468,7 @@ static inline ssize_t ff_mapThreadToCpu(int cpu_id, int priority_level=0) {
     cpu_set_t mask;
     CPU_ZERO(&mask);
     CPU_SET(cpu_id, &mask);
-    if (sched_setaffinity(gettid(), sizeof(mask), &mask) != 0) 
+    if (sched_setaffinity(ff_gettid(), sizeof(mask), &mask) != 0) 
         return EINVAL;
     return (ff_setPriority(priority_level));
 #elif defined(__APPLE__) && MAC_OS_X_HAS_AFFINITY

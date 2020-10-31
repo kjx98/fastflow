@@ -24,66 +24,76 @@
  *
  ****************************************************************************
  */
-/*  
- *         
- *  Stage1 -----> Stage2 -----> Stage3
- *                 ^               |
- *                  \--------------         
- *
+/* Testing: 
+ * 
+ *   Left -->|    
+ *           |    | -> pipe(Right -> Right)
+ *     ...   | -->|  
+ *           |    | -> comb(Right,Right)
+ *   Left -->|
+ *                          
+ * In this simple test, the right-hand side Workers are "heterogeneous", the top one is 
+ * a pipeline (starting with a multi-input node) and the bottom one is a combine node. 
  */
+/*
+ *
+ * Author: Massimo Torquati
+ */
+
+#include <mutex>
+#include <iostream>
+#include <string>
 #include <ff/ff.hpp>
 
 using namespace ff;
-long const int NUMTASKS=1000;
 
-struct Stage1: ff_node {
-    void *svc(void*) {
-        for(long i=1;i<=NUMTASKS;++i)
-            ff_send_out((void*)i);
-        return NULL;
-    }
+struct Left: ff_monode_t<long> {
+	Left(long ntasks): ntasks(ntasks) {}
+
+	long* svc(long*) {
+        for (long i=1;i<=ntasks;++i)
+            ff_send_out(&i);        
+		return EOS; 
+	}
+    long ntasks;
 };
-struct Stage2: ff_minode {
-    void *svc(void *task) {
-        printf("Stage2 got task from %zd\n", get_channel_id());        
-        if (fromInput()) return task; 
+struct Right: ff_minode_t<long> {
+    Right(const bool propagate=false):propagate(propagate) {}
+	long* svc(long* in) {
+        if (propagate) return in;
         return GO_ON;
-    }
-    void eosnotify(ssize_t) {
-        ff_send_out((void*)EOS);
-    }
+	}
+    const bool propagate;
 };
-struct Stage3: ff_node {
-    void *svc(void *task) {
-        long t=(long)task;
-        printf("Stage3: got %ld, sending it back\n",t);
-        return task;
-    }
-};
-int main() {
-    Stage1 s1; Stage2 s2; Stage3 s3;
-#if 0    
-    ff_pipeline pipe2;
-    pipe2.add_stage(&s2);
-    pipe2.add_stage(&s3);
-    if (pipe2.wrap_around()<0) {
-        error("wrap_around\n");
-        return -1;
-    }
 
+
+int main(int argc, char* argv[]) {
+    long ntasks   = 1000000;
+    long nlefts   = 4;
+    
+    std::vector<ff_node*> W1;
+    for(long i=0;i<nlefts;++i) {
+        W1.push_back(new Left(ntasks/nlefts));
+    }
+    std::vector<ff_node*> W2;
     ff_pipeline pipe;
-    pipe.add_stage(&s1);
-    pipe.add_stage(&pipe2);
-    pipe.run_and_wait_end();
-#else
-    ff_Pipe pipeI(s2,s3);
-    pipeI.wrap_around();
-    ff_Pipe pipe(s1,pipeI);
-    if (pipe.run_and_wait_end()<0) {
-        error("running pipe\n");
+    pipe.add_stage(new Right(true), true);
+    pipe.add_stage(new Right(false), true);
+    W2.push_back(&pipe);
+    ff_comb comb(new Right(true), new Right(false), true,true);
+    W2.push_back(&comb);
+  
+    ff_a2a a2a;
+    a2a.add_firstset(W1, 0, true);
+    a2a.add_secondset(W2);
+    
+    if (a2a.run_and_wait_end()<0) {
+        error("running a2a\n");
         return -1;
     }
-#endif    
-    printf("DONE\n");
+    std::cout << "Done\n";
     return 0;
 }
+
+
+

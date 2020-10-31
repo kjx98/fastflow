@@ -59,7 +59,21 @@ protected:
             error("A2A, nodes of the first set cannot be farm or all-to-all\n");
             return -1;
         }
+        if (workers2[0]->isFarm() || workers2[0]->isAll2All()) {
+            error("A2A, nodes of the second set cannot be farm or all-to-all\n");
+            return -1;
+        }
+        
         if (workers1[0]->isPipe()) {
+
+            // all other Workers must be pipe
+            for(size_t i=1;i<workers1.size();++i) {
+                if (!workers1[i]->isPipe()) {
+                    error("A2A, workers of the first set are not homogeneous, all of them must be of the same kind of building-block (e.g., all pipelines)\n");
+                    return -1;
+                }
+            }
+            
             if (!workers1[0]->isMultiOutput()) {
                 error("A2A, workers of the first set can be pipelines but only if they are multi-output (automatic transformation not yet supported)\n");
                 return -1;
@@ -85,11 +99,7 @@ protected:
                 }
             }
         }
-        if (workers2[0]->isFarm() || workers2[0]->isAll2All()) {
-            error("A2A, nodes of the second set cannot be farm or all-to-all\n");
-            return -1;
-        }
-
+       
         // checking L-Workers
         if (!workers1[0]->isMultiOutput()) {  // NOTE: we suppose all others to be the same
             // the nodes in the first set cannot be multi-input nodes without being
@@ -100,7 +110,7 @@ protected:
             }
             // it is a standard node or a pipeline with a standard node as last stage, so we transform it to a multi-output node
             for(size_t i=0;i<workers1.size();++i) {
-                ff_monode *mo = new mo_transformer(workers1[i], workers1_to_free);
+                internal_mo_transformer *mo = new internal_mo_transformer(workers1[i], workers1_to_free);
                 if (!mo) {
                     error("A2A, FATAL ERROR not enough memory\n");
                     return -1;
@@ -117,7 +127,7 @@ protected:
             workers1[i]->set_id(int(i));
         }
         // checking R-Workers
-        if (!workers2[0]->isMultiInput()) { // we suppose that all others are the same        
+        if (!workers2[0]->isMultiInput()) { // NOTE: we suppose that all others are the same        
             if (workers2[0]->isMultiOutput()) {
                 error("A2A, the nodes of the second set cannot be multi-output nodes without being also multi-input (i.e., a composition of nodes). The node must be either standard node or multi-input node or compositions where the first stage is a multi-input node\n");
                 return -1;
@@ -125,7 +135,7 @@ protected:
 
             // here we have to transform the standard node into a multi-input node
             for(size_t i=0;i<workers2.size();++i) {
-                ff_minode *mi = new mi_transformer(workers2[i], workers2_to_free);
+                internal_mi_transformer *mi = new internal_mi_transformer(workers2[i], workers2_to_free);
                 if (!mi) {
                     error("A2A, FATAL ERROR not enough memory\n");
                     return -1;
@@ -197,20 +207,19 @@ protected:
                 return -1;
         }
 
-
-        // blocking stuff
+     
+        // blocking stuff --------------------------------------------
         pthread_mutex_t   *m        = NULL;
         pthread_cond_t    *c        = NULL;
-        std::atomic_ulong *counter  = NULL;
         for(size_t i=0;i<nworkers2;++i) {
             // initialize worker2 local cons_* stuff and sets all p_cons_*
-            if (!workers2[i]->init_input_blocking(m,c,counter)) return -1;
+            if (!workers2[i]->init_input_blocking(m,c)) return -1;
         }
         for(size_t i=0;i<nworkers1;++i) {
             // initialize worker1 local prod_* stuff and sets all p_prod_*
-            if (!workers1[i]->init_output_blocking(m,c,counter)) return -1;
+            if (!workers1[i]->init_output_blocking(m,c)) return -1;
         }
-            
+        // ------------------------------------------------------------            
         prepared = true;
         return 0;
     }
@@ -219,7 +228,9 @@ protected:
 
     
 public:
-    enum {DEF_IN_BUFF_ENTRIES=2048};
+    enum { DEF_IN_BUFF_ENTRIES=DEFAULT_BUFFER_CAPACITY,
+           DEF_IN_OUT_DIFF=DEFAULT_IN_OUT_CAPACITY_DIFFERENCE,
+           DEF_OUT_BUFF_ENTRIES=(DEF_IN_BUFF_ENTRIES+DEF_IN_OUT_DIFF)};
 
     /**
      *
@@ -227,10 +238,13 @@ public:
      * by making use of multi-producer input queues.
      *
      */
-    ff_a2a(bool reduce_channels=false, int in_buffer_entries=DEF_IN_BUFF_ENTRIES,
-           bool fixedsize=false):prepared(false),fixedsize(fixedsize),
+    ff_a2a(bool reduce_channels=false,
+           int in_buffer_entries=DEF_IN_BUFF_ENTRIES,
+           int out_buffer_entries=DEF_OUT_BUFF_ENTRIES,
+           bool fixedsize=FF_FIXED_SIZE):prepared(false),fixedsize(fixedsize),
                                  reduce_channels(reduce_channels), 
-                                 in_buffer_entries(in_buffer_entries)
+                                 in_buffer_entries(in_buffer_entries),
+                                 out_buffer_entries(out_buffer_entries)
     {}
     
     virtual ~ff_a2a() {
@@ -271,8 +285,8 @@ public:
         return 0;        
     }
     int change_firstset(const std::vector<ff_node*>& w, int ondemand=0, bool cleanup=false) {
-        error("A2A, change_firstset not yet implemented\n");
-        return -1;
+        workers1.clear();
+        return add_firstset(w, ondemand, cleanup);
     }
     /**
      * The nodes of the second set must be either standard ff_node or a node that is multi-input.
@@ -354,7 +368,7 @@ public:
         }
         for(size_t i=0;i<nworkers2; ++i) {
             workers2[i]->blocking_mode(blocking_in);
-            if (!default_mapping) workers1[i]->no_mapping();
+            if (!default_mapping) workers2[i]->no_mapping();
             if (workers2[i]->run(true)<0) {
                 error("ERROR: A2A, running worker (second set) %d\n", i);
                 return -1;
@@ -391,11 +405,27 @@ public:
         return 0;
     }
 
+    /**
+     * \brief checks if the node is running 
+     *
+     */
+    bool done() const { 
+        const size_t nworkers1 = workers1.size();
+        const size_t nworkers2 = workers2.size();
+        for(size_t i=0;i<nworkers1;++i) 
+            if (!workers1[i]->done()) return false;
+        for(size_t i=0;i<nworkers2;++i) 
+            if (!workers2[i]->done()) return false;
+        return true;
+    }
+
     const svector<ff_node*>& getFirstSet()  const { return workers1; }
     const svector<ff_node*>& getSecondSet() const { return workers2; }
 
     bool isset_cleanup_firstset()  const { return workers1_to_free; }
     bool isset_cleanup_secondset() const { return workers2_to_free;}
+
+    int ondemand_buffer() const { return ondemand_chunk; }
     
     void cleanup_firstset(bool onoff=true) {
         workers1_to_free = onoff;
@@ -426,9 +456,10 @@ public:
             w += getSecondSet();
     }
     void get_in_nodes(svector<ff_node*>&w) {
+        size_t len=w.size();
         for(size_t i=0;i<workers1.size();++i)
             workers1[i]->get_in_nodes(w);
-        if (w.size() == 0)
+        if (len == w.size())
             w += getFirstSet();
     }
 
@@ -441,8 +472,8 @@ public:
      */
     int wrap_around() {
 
-        if (workers2[0]->isMultiOutput()) { // we suppose that all others are the same
-            if (workers1[0]->isMultiInput()) { // we suppose that all others are the same
+        if (workers2[0]->isMultiOutput()) { // NOTE: we suppose that all others are the same
+            if (workers1[0]->isMultiInput()) { // NOTE: we suppose that all others are the same
                 for(size_t i=0;i<workers2.size(); ++i) {
                     for(size_t j=0;j<workers1.size();++j) {
                         ff_node* t = new ff_buffernode(in_buffer_entries,false);
@@ -475,7 +506,6 @@ public:
                 error("A2A, wrap_around, the workers of the second set are not multi-output nodes so the cardinatlity of the first and second set must be the same\n");
                 return -1;
             }
-
             if (!workers1[0]->isMultiInput()) {  // we suppose that all others are the same
                 if (create_input_buffer(in_buffer_entries, false) <0) {
                     error("A2A, error creating input buffers\n");
@@ -486,8 +516,7 @@ public:
                     workers2[i]->set_output_buffer(workers1[i]->get_in_buffer());
                 
             } else {
-                
-                if (create_output_buffer(in_buffer_entries, false) <0) {
+                if (create_output_buffer(out_buffer_entries, false) <0) {
                     error("A2A, error creating output buffers\n");
                     return -1;
                 }
@@ -500,33 +529,27 @@ public:
             }
         }
 
-        // blocking stuff....
+        // blocking stuff --------------------------------------------
         pthread_mutex_t   *m        = NULL;
         pthread_cond_t    *c        = NULL;
-        std::atomic_ulong *counter  = NULL;
-        if (workers2[0]->isMultiOutput()) {
-            for(size_t i=0;i<workers2.size(); ++i) {
-                if (!workers2[i]->init_output_blocking(m,c,counter)) return -1;
-            }
-        } else {
+        for(size_t i=0;i<workers2.size(); ++i) {
+            if (!workers2[i]->init_output_blocking(m,c)) return -1;
+        }
+        if (!workers2[0]->isMultiOutput()) {
             assert(workers1.size() == workers2.size());
-            for(size_t i=0;i<workers2.size(); ++i) {
-                if (!workers2[i]->init_output_blocking(m,c,counter)) return -1;
-                workers1[i]->set_input_blocking(m,c,counter);
-            }
         }
         if (workers1[0]->isMultiInput()) {
             for(size_t i=0;i<workers1.size();++i) {
-                if (!workers1[i]->init_input_blocking(m,c,counter)) return -1;
+                if (!workers1[i]->init_input_blocking(m,c)) return -1;
             }
         } else {
             assert(workers1.size() == workers2.size());
             for(size_t i=0;i<workers1.size();++i) {
-                if (!workers1[i]->init_input_blocking(m,c,counter)) return -1;
-                workers2[i]->set_output_blocking(m,c,counter);
+                if (!workers1[i]->init_input_blocking(m,c)) return -1;
+                workers2[i]->set_output_blocking(m,c);
             }
         }
-        
+        // -----------------------------------------------------------
         return 0;
     }
 
@@ -598,7 +621,7 @@ protected:
     bool isMultiOutput() const { return true;}
     bool isAll2All()     const { return true; }    
 
-    int create_input_buffer(int nentries, bool fixedsize=false) {
+    int create_input_buffer(int nentries, bool fixedsize=FF_FIXED_SIZE) {
         size_t nworkers1 = workers1.size();
         for(size_t i=0;i<nworkers1; ++i)
             if (workers1[i]->create_input_buffer(nentries,fixedsize)==-1) return -1;
@@ -613,7 +636,7 @@ protected:
         return 0;
     }
 
-    int create_output_buffer(int nentries, bool fixedsize=false) {
+    int create_output_buffer(int nentries, bool fixedsize=FF_FIXED_SIZE) {
         size_t nworkers2 = workers2.size();
         for(size_t i=0;i<nworkers2; ++i) {
             if (workers2[i]->isMultiOutput()) {
@@ -632,44 +655,34 @@ protected:
         return 0;        
     }
     
-    bool init_input_blocking(pthread_mutex_t   *&m,
-                             pthread_cond_t    *&c,
-                             std::atomic_ulong *&counter) {
+    bool init_input_blocking(pthread_mutex_t   *&,
+                             pthread_cond_t    *&,
+                             bool /*feedback*/=true) {
         size_t nworkers1 = workers1.size();
         for(size_t i=0;i<nworkers1; ++i) {
             pthread_mutex_t   *m        = NULL;
             pthread_cond_t    *c        = NULL;
-            std::atomic_ulong *counter  = NULL;
-            if (!workers1[i]->init_input_blocking(m,c,counter)) return false;
+            if (!workers1[i]->init_input_blocking(m,c)) return false;
         }
         return true;
     }
-    bool init_output_blocking(pthread_mutex_t   *&m,
-                              pthread_cond_t    *&c,
-                              std::atomic_ulong *&counter) {
+    bool init_output_blocking(pthread_mutex_t   *&,
+                              pthread_cond_t    *&,
+                              bool /*feedback*/=true) {
         size_t nworkers2 = workers2.size();
         for(size_t i=0;i<nworkers2; ++i) {
             pthread_mutex_t   *m        = NULL;
             pthread_cond_t    *c        = NULL;
-            std::atomic_ulong *counter  = NULL;
-            if (!workers2[i]->init_output_blocking(m,c,counter)) return false;
+            if (!workers2[i]->init_output_blocking(m,c)) return false;
         }
         return true;
     }
-    void set_input_blocking(pthread_mutex_t   *&m,
-                            pthread_cond_t    *&c,
-                            std::atomic_ulong *&counter) {
-        size_t nworkers1 = workers1.size();
-        for(size_t i=0;i<nworkers1; ++i) {
-            workers1[i]->set_input_blocking(m,c,counter);
-        }
-    }    
     void set_output_blocking(pthread_mutex_t   *&m,
                              pthread_cond_t    *&c,
-                             std::atomic_ulong *&counter) {
+                             bool canoverwrite=false) {
         size_t nworkers2 = workers2.size();
         for(size_t i=0;i<nworkers2; ++i) {
-            workers2[i]->init_output_blocking(m,c,counter);
+            workers2[i]->set_output_blocking(m,c, canoverwrite);
         }
     }
    
@@ -677,7 +690,8 @@ protected:
     bool workers1_to_free=false;
     bool workers2_to_free=false;
     bool prepared, fixedsize,reduce_channels;
-    int in_buffer_entries, ondemand_chunk=0;
+    int in_buffer_entries, out_buffer_entries;
+    int ondemand_chunk=0;
     svector<ff_node*>  workers1;  // first set, nodes must be multi-output
     svector<ff_node*>  workers2;  // second set, nodes must be multi-input
     svector<ff_node*>  outputNodes;

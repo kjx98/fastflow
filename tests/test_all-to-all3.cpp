@@ -51,6 +51,8 @@ using namespace ff;
 
 struct Generator: ff_monode_t<long> { 
     long *svc(long*) {
+        assert(get_num_outchannels() == 3);
+        
         // sum: odd 271 even 344
         ff_send_out_to(new long(13),  0);
         ff_send_out_to(new long(17),  0);
@@ -94,7 +96,7 @@ struct Even: ff_node_t<long> {
         delete in;
 	    return GO_ON;
     }
-    void eosnotify(ssize_t id=-1) {
+    void eosnotify(ssize_t=-1) {
         printf("Even received EOS\n");
         ff_send_out(new long(sum));
     }
@@ -107,7 +109,7 @@ struct Odd: ff_node_t<long> {
         delete in;
 	    return GO_ON;
     }
-    void eosnotify(ssize_t id=-1) {
+    void eosnotify(ssize_t=-1) {
         printf("Odd received EOS\n");
         ff_send_out(new long(sum));
     }
